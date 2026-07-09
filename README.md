@@ -3,13 +3,14 @@
 A deliberately small [Pi](https://github.com/earendil-works/pi-mono) extension that adds exactly two tools:
 
 - **`web_search`** — web search via [Exa](https://exa.ai) (API key required).
-- **`fetch_content`** — fetch a URL and return clean markdown, using HTTP content
-  negotiation → Readability → a lazy headless-browser fallback for JavaScript-rendered pages.
+- **`fetch_content`** — fetch a URL (web page or PDF) and return clean markdown, using HTTP
+  content negotiation → Readability → a lazy headless-browser fallback for JavaScript-rendered
+  pages. Large content is saved to a temp file and returned as a preview + path.
 
 It's a focused alternative to the excellent but feature-rich
 [`pi-web-access`](https://github.com/nicobailon/pi-web-access) by Nico Bailon — if
 you only want search + fetch and nothing else (no video, YouTube, GitHub cloning,
-PDF, curator UI, or multi-provider routing), this is that.
+curator UI, or multi-provider routing), this is that.
 
 ## Install
 
@@ -90,11 +91,13 @@ fetch_content({ urls: ["https://a.com", "https://b.com"] })
 fetch_content(url)
   → SSRF guard (blocks localhost / private / reserved IPs)
   → HTTP fetch with `Accept: text/markdown, text/html;q=0.9, …`
+      → PDF (Content-Type or .pdf)?   unpdf text extraction (with page markers)
       → Content-Type: text/markdown?  return as-is (skip Readability entirely)
       → HTML?                         Readability → Turndown → markdown
       → text / json / plain?          return as-is
   → still empty / looks JS-rendered?  render with headless Chromium (Playwright),
                                       then Readability, falling back to full <body>
+  → large result (> 100k chars)?      write to a temp file, return a preview + path
 ```
 
 - **Markdown content negotiation.** Many docs sites (Cloudflare, Vercel, Mintlify,
@@ -111,6 +114,13 @@ fetch_content(url)
 
   Without it, JavaScript-rendered pages return an error with this hint instead of
   silently failing.
+- **PDFs** are extracted to text with [`unpdf`](https://github.com/unjs/unpdf),
+  one page at a time with `<!-- Page N -->` markers so you can jump to a section.
+  Text-based extraction only — no OCR for scanned/image-only PDFs.
+- **Large content is never truncated away.** Anything over 100k chars is written to
+  `$TMPDIR/pi-web-tools/<host>-<hash>.md`; the tool returns a short preview plus the
+  file path so the agent reads exactly the slice it needs with the built-in `read`
+  tool (`offset`/`limit`) instead of loading the whole page into context.
 
 ## Files
 
@@ -118,7 +128,7 @@ fetch_content(url)
 |------|---------|
 | `index.ts` | Extension entry — registers the two tools |
 | `exa.ts` | Exa search client + markdown result formatting |
-| `fetch.ts` | Fetch → content negotiation → Readability/Turndown → Playwright |
+| `fetch.ts` | Fetch → content negotiation → PDF/Readability/Turndown → Playwright |
 | `ssrf.ts` | SSRF guard (DNS resolution + private/reserved IP checks) |
 | `config.ts` | Loads `~/.pi/web-tools.json` and `EXA_API_KEY` |
 

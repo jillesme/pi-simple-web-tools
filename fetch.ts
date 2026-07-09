@@ -9,6 +9,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const CONCURRENT_LIMIT = 3;
 const MIN_USEFUL_CONTENT = 500;
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+const MAX_PDF_BYTES = 20 * 1024 * 1024;
 
 const BROWSER_HEADERS: Record<string, string> = {
 	"User-Agent":
@@ -30,7 +31,7 @@ export interface FetchedContent {
 	title: string;
 	content: string;
 	error: string | null;
-	renderer: "markdown" | "http" | "playwright" | null;
+	renderer: "markdown" | "http" | "playwright" | "pdf" | null;
 }
 
 function errorMessage(err: unknown): string {
@@ -41,9 +42,40 @@ function errorMessage(err: unknown): string {
 function firstHeadingTitle(text: string, url: string): string {
 	return (
 		text.match(/^#{1,6}\s+(.+)/m)?.[1]?.trim() ||
-		new URL(url).pathname.split("/").filter(Boolean).pop() ||
-		url
+		urlBasename(url)
 	);
+}
+
+function urlBasename(url: string): string {
+	try {
+		return new URL(url).pathname.split("/").filter(Boolean).pop() || url;
+	} catch {
+		return url;
+	}
+}
+
+function isPdf(url: string, mediaType: string): boolean {
+	return mediaType === "application/pdf" || urlBasename(url).toLowerCase().endsWith(".pdf");
+}
+
+/** Extract PDF text page-by-page (with page markers) via unpdf, lazily loaded. */
+async function extractPdfText(buffer: ArrayBuffer, url: string): Promise<string> {
+	const { getDocumentProxy } = await import("unpdf");
+	const pdf = await getDocumentProxy(new Uint8Array(buffer));
+	const lines: string[] = [`# ${urlBasename(url)}`, "", `> Source: ${url}`, `> Pages: ${pdf.numPages}`, "", "---", ""];
+	for (let i = 1; i <= pdf.numPages; i++) {
+		const page = await pdf.getPage(i);
+		const content = await page.getTextContent();
+		const pageText = content.items
+			.map((item) => (item as { str?: string }).str ?? "")
+			.join(" ")
+			.replace(/\s+/g, " ")
+			.trim();
+		if (!pageText) continue;
+		if (i > 1) lines.push("", `<!-- Page ${i} -->`, "");
+		lines.push(pageText);
+	}
+	return lines.join("\n");
 }
 
 function isAbortError(err: unknown): boolean {
@@ -129,11 +161,25 @@ async function extractViaHttp(url: string, signal?: AbortSignal): Promise<Fetche
 
 		const contentType = response.headers.get("content-type") || "";
 		const mediaType = contentType.split(";")[0].trim().toLowerCase();
+		const pdf = isPdf(url, mediaType);
 		const contentLength = Number(response.headers.get("content-length") ?? 0);
-		if (contentLength > MAX_RESPONSE_BYTES) {
+		const maxBytes = pdf ? MAX_PDF_BYTES : MAX_RESPONSE_BYTES;
+		if (contentLength > maxBytes) {
 			return err(url, `Response too large (${Math.round(contentLength / 1024 / 1024)}MB)`);
 		}
-		if (/(application\/octet-stream|image\/|audio\/|video\/|application\/zip|application\/pdf)/.test(contentType)) {
+
+		if (pdf) {
+			try {
+				const content = await extractPdfText(await response.arrayBuffer(), url);
+				return content.trim()
+					? { url, title: urlBasename(url), content, error: null, renderer: "pdf" }
+					: err(url, "PDF contained no extractable text (may be scanned/image-only)");
+			} catch (e) {
+				return err(url, `PDF extraction failed: ${errorMessage(e)}`);
+			}
+		}
+
+		if (/(application\/octet-stream|image\/|audio\/|video\/|application\/zip)/.test(contentType)) {
 			return err(url, `Unsupported content type: ${mediaType}`);
 		}
 

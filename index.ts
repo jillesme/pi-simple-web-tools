@@ -1,10 +1,50 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { formatExaResults, searchWithExa, type ExaResponse } from "./exa.ts";
-import { fetchAllContent } from "./fetch.ts";
+import { fetchAllContent, type FetchedContent } from "./fetch.ts";
 
+/** Content above this size is written to a temp file; only a preview is returned inline. */
 const MAX_INLINE_CONTENT = 100_000;
+const PREVIEW_CHARS = 4_000;
+const TEMP_DIR = join(tmpdir(), "pi-web-tools");
+
+/** Write full content to a stable temp path derived from the URL and return the path. */
+function persistContent(url: string, content: string): string {
+	mkdirSync(TEMP_DIR, { recursive: true });
+	let host = "page";
+	try {
+		host = new URL(url).hostname.replace(/[^a-z0-9.-]/gi, "_") || "page";
+	} catch {
+		/* keep default */
+	}
+	const hash = createHash("sha1").update(url).digest("hex").slice(0, 8);
+	const path = join(TEMP_DIR, `${host}-${hash}.md`);
+	writeFileSync(path, content, "utf-8");
+	return path;
+}
+
+/** Render one fetched result: inline if small, otherwise persist and return a preview + path. */
+function renderResult(r: FetchedContent, multi: boolean): { text: string; path: string | null } {
+	if (r.error) {
+		return { text: multi ? `## ${r.url}\n\n_Error: ${r.error}_` : `Error: ${r.error}`, path: null };
+	}
+	const heading = multi ? `## ${r.title || r.url}\n${r.url}\n\n` : "";
+	if (r.content.length <= MAX_INLINE_CONTENT) {
+		return { text: `${heading}${r.content}`, path: null };
+	}
+	const path = persistContent(r.url, r.content);
+	const preview =
+		`Fetched ${r.content.length} chars from ${r.url} (renderer: ${r.renderer}).\n` +
+		`Full content saved to:\n${path}\n\n` +
+		`Read specific sections with the read tool (offset/limit) instead of loading it all.\n\n` +
+		`--- Preview (first ${PREVIEW_CHARS} chars) ---\n\n${r.content.slice(0, PREVIEW_CHARS)}`;
+	return { text: `${heading}${preview}`, path };
+}
 
 export default function (pi: ExtensionAPI) {
 	pi.registerTool({
@@ -74,9 +114,10 @@ export default function (pi: ExtensionAPI) {
 		name: "fetch_content",
 		label: "Fetch Content",
 		description:
-			"Fetch URL(s) and extract the main readable content as markdown. Uses an HTTP fetch with Readability, " +
-			"and automatically falls back to a headless browser (Playwright) for JavaScript-rendered pages when installed.",
-		promptSnippet: "Use to fetch a web page and get its readable content as markdown.",
+			"Fetch URL(s) and extract the main readable content as markdown. Requests markdown via content negotiation, " +
+			"falls back to Readability, then a headless browser (Playwright) for JS-rendered pages. Also extracts text from PDFs. " +
+			"Large content is written to a temp file and only a preview is returned inline — use the read tool with offset/limit to read the rest.",
+		promptSnippet: "Use to fetch a web page or PDF as markdown. Large results are saved to a file path you can read with offset/limit.",
 		parameters: Type.Object({
 			url: Type.Optional(Type.String({ description: "Single URL to fetch." })),
 			urls: Type.Optional(Type.Array(Type.String(), { description: "Multiple URLs (fetched in parallel)." })),
@@ -97,39 +138,29 @@ export default function (pi: ExtensionAPI) {
 			onUpdate?.({ content: [{ type: "text", text: `Fetching ${urlList.length} URL(s)...` }] });
 			const results = await fetchAllContent(urlList, signal);
 
-			// Single URL: return content directly.
+			// Single URL: return content directly (or a preview + path when large).
 			if (results.length === 1) {
 				const r = results[0];
-				if (r.error) {
-					return {
-						content: [{ type: "text", text: `Error: ${r.error}` }],
-						details: { url: r.url, error: r.error },
-					};
-				}
-				const truncated = r.content.length > MAX_INLINE_CONTENT;
-				const body = truncated
-					? `${r.content.slice(0, MAX_INLINE_CONTENT)}\n\n[Content truncated at ${MAX_INLINE_CONTENT} of ${r.content.length} chars.]`
-					: r.content;
+				const { text, path } = renderResult(r, false);
 				return {
-					content: [{ type: "text", text: body }],
-					details: { url: r.url, title: r.title, chars: r.content.length, renderer: r.renderer, truncated },
+					content: [{ type: "text", text }],
+					details: r.error
+						? { url: r.url, error: r.error }
+						: { url: r.url, title: r.title, chars: r.content.length, renderer: r.renderer, path },
 				};
 			}
 
-			// Multiple URLs: concatenate with headers.
-			const sections = results.map((r) =>
-				r.error
-					? `## ${r.url}\n\n_Error: ${r.error}_`
-					: `## ${r.title || r.url}\n${r.url}\n\n${
-							r.content.length > MAX_INLINE_CONTENT
-								? `${r.content.slice(0, MAX_INLINE_CONTENT)}\n\n[Truncated.]`
-								: r.content
-						}`,
-			);
+			// Multiple URLs: concatenate sections; large ones are persisted to their own file.
+			const rendered = results.map((r) => renderResult(r, true));
 			const successful = results.filter((r) => !r.error).length;
 			return {
-				content: [{ type: "text", text: sections.join("\n\n---\n\n") }],
-				details: { urls: urlList, successful, failed: results.length - successful },
+				content: [{ type: "text", text: rendered.map((s) => s.text).join("\n\n---\n\n") }],
+				details: {
+					urls: urlList,
+					successful,
+					failed: results.length - successful,
+					paths: rendered.map((s) => s.path).filter(Boolean),
+				},
 			};
 		},
 	});
