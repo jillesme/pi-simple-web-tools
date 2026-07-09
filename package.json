@@ -1,0 +1,40 @@
+{
+  "name": "pi-simple-web-tools",
+  "version": "0.1.0",
+  "description": "Minimal Pi extension: web_search via Exa + fetch_content (markdown content-negotiation, Readability, lazy Playwright fallback).",
+  "type": "module",
+  "license": "MIT",
+  "author": "Jilles Soeters",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "web-search",
+    "exa",
+    "fetch"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jillesme/pi-simple-web-tools.git"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "linkedom": "^0.16.0",
+    "p-limit": "^6.1.0",
+    "turndown": "^7.2.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "devDependencies": {
+    "playwright": "^1.61.1"
+  }
+}

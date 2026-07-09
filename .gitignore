@@ -1,0 +1,5 @@
+node_modules/
+# Local config may contain an Exa API key — never commit it.
+web-tools.json
+.env
+.DS_Store
