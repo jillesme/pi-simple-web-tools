@@ -18,6 +18,17 @@
     "type": "git",
     "url": "git+https://github.com/jillesme/pi-simple-web-tools.git"
   },
+  "homepage": "https://github.com/jillesme/pi-simple-web-tools#readme",
+  "bugs": {
+    "url": "https://github.com/jillesme/pi-simple-web-tools/issues"
+  },
+  "files": [
+    "*.ts"
+  ],
+  "scripts": {
+    "check": "npm pack --dry-run",
+    "prepublishOnly": "npm run check"
+  },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
     "linkedom": "^0.16.0",

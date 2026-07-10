@@ -15,7 +15,7 @@ curator UI, or multi-provider routing), this is that.
 ## Install
 
 ```bash
-pi install git:github.com/jillesme/pi-simple-web-tools
+pi install npm:pi-simple-web-tools
 ```
 
 Or clone into your extensions directory for local development:
