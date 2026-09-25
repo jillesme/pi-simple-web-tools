@@ -65,37 +65,54 @@ web_search({ query: "typescript structural typing" })
 web_search({ queries: ["react server components", "next.js app router caching"] })
 web_search({ query: "llm evals", numResults: 10, recencyFilter: "month" })
 web_search({ query: "vite plugins", domainFilter: ["github.com", "-medium.com"] })
+web_search({ query: "state space models vs transformers", type: "deep", category: "publication" })
+web_search({ queries: ["cloudflare earnings", "cloudflare workers pricing change"], type: "fast", category: "news" })
 ```
 
 | Parameter | Description |
 |-----------|-------------|
-| `query` / `queries` | Single query, or multiple searched independently |
+| `query` / `queries` | Single query, or multiple searched independently and in parallel (max 5 in flight). A failing query is reported inline without dropping the others. |
 | `numResults` | Results per query (default 5, max 20) |
+| `type` | `instant`, `fast`, `auto` (default), `deep-lite`, `deep`, `deep-reasoning` — trade speed for depth |
+| `category` | `publication`, `news`, `company`, `people`, `personal site`, `financial report` |
 | `recencyFilter` | `day`, `week`, `month`, or `year` |
 | `domainFilter` | Limit to domains (prefix with `-` to exclude) |
+
+`company` and `people` categories don't support `recencyFilter` or excluded (`-`)
+domains (an Exa API restriction); the tool returns a clear error if you combine them.
 
 ### `fetch_content`
 
 ```typescript
 fetch_content({ url: "https://example.com/article" })
 fetch_content({ urls: ["https://a.com", "https://b.com"] })
+fetch_content({ url: "https://some-spa.example.com", forceBrowser: true })
 ```
 
 | Parameter | Description |
 |-----------|-------------|
 | `url` / `urls` | Single URL or multiple (fetched in parallel, max 3 concurrent) |
+| `forceBrowser` | Skip plain HTTP and render with headless Chromium directly (requires Playwright). Useful when a normal fetch returns placeholder/partial content. |
+
+Successful fetches are cached in memory for 15 minutes (max 100 entries), so
+re-fetching the same URL in a session is instant. `forceBrowser` results are cached
+separately.
 
 ## How `fetch_content` works
 
 ```
 fetch_content(url)
+  → in-memory cache hit (< 15 min)?   return it
   → SSRF guard (blocks localhost / private / reserved IPs)
   → HTTP fetch with `Accept: text/markdown, text/html;q=0.9, …`
       → PDF (Content-Type or .pdf)?   unpdf text extraction (with page markers)
       → Content-Type: text/markdown?  return as-is (skip Readability entirely)
       → HTML?                         Readability → Turndown → markdown
       → text / json / plain?          return as-is
-  → still empty / looks JS-rendered?  render with headless Chromium (Playwright),
+  → HTTP error?                       explain it (404, 429, paywall, timeout, DNS, …);
+                                      only 401/403/503 fall through to the browser
+  → bot challenge / JS-rendered /     render with headless Chromium (Playwright)
+    no readable content?              (or immediately, with forceBrowser: true),
                                       then Readability, falling back to full <body>
   → large result (> 100k chars)?      write to a temp file, return a preview + path
 ```

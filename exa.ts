@@ -2,9 +2,26 @@ import { getExaApiKey } from "./config.ts";
 
 const EXA_SEARCH_URL = "https://api.exa.ai/search";
 const REQUEST_TIMEOUT_MS = 60_000;
+/** Deep search types do multi-step research and can take considerably longer. */
+const DEEP_REQUEST_TIMEOUT_MS = 180_000;
+
+export const SEARCH_TYPES = ["instant", "fast", "auto", "deep-lite", "deep", "deep-reasoning"] as const;
+export type SearchType = (typeof SEARCH_TYPES)[number];
+
+export const SEARCH_CATEGORIES = [
+	"company",
+	"people",
+	"publication",
+	"news",
+	"personal site",
+	"financial report",
+] as const;
+export type SearchCategory = (typeof SEARCH_CATEGORIES)[number];
 
 export interface ExaSearchOptions {
 	numResults?: number;
+	type?: SearchType;
+	category?: SearchCategory;
 	recencyFilter?: "day" | "week" | "month" | "year";
 	domainFilter?: string[];
 	signal?: AbortSignal;
@@ -20,6 +37,7 @@ export interface ExaResult {
 export interface ExaResponse {
 	query: string;
 	results: ExaResult[];
+	error?: string;
 }
 
 interface ExaApiResponse {
@@ -58,8 +76,8 @@ function normalizeHighlights(value: unknown): string {
 	return value.filter((h): h is string => typeof h === "string" && h.trim().length > 0).join(" … ");
 }
 
-function requestSignal(signal?: AbortSignal): AbortSignal {
-	const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+function requestSignal(type: SearchType, signal?: AbortSignal): AbortSignal {
+	const timeout = AbortSignal.timeout(type.startsWith("deep") ? DEEP_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
 	return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
@@ -74,22 +92,34 @@ export async function searchWithExa(
 		);
 	}
 
+	const type = options.type ?? "auto";
+	const domains = mapDomainFilter(options.domainFilter);
+	// Exa rejects date filters and excludeDomains for the company/people categories (400).
+	if (options.category === "company" || options.category === "people") {
+		if (options.recencyFilter || domains.excludeDomains) {
+			throw new Error(
+				`Category "${options.category}" does not support recencyFilter or excluded domains ("-domain"). Remove them and retry.`,
+			);
+		}
+	}
+
 	const startDate = options.recencyFilter ? recencyToStartDate(options.recencyFilter) : null;
 	const response = await fetch(EXA_SEARCH_URL, {
 		method: "POST",
 		headers: { "x-api-key": apiKey, "Content-Type": "application/json" },
 		body: JSON.stringify({
 			query,
-			type: "auto",
+			type,
 			numResults: options.numResults ?? 5,
-			...mapDomainFilter(options.domainFilter),
+			...(options.category ? { category: options.category } : {}),
+			...domains,
 			...(startDate ? { startPublishedDate: startDate } : {}),
 			contents: {
 				text: { maxCharacters: 2000 },
 				highlights: true,
 			},
 		}),
-		signal: requestSignal(options.signal),
+		signal: requestSignal(type, options.signal),
 	});
 
 	if (!response.ok) {
@@ -112,8 +142,9 @@ export async function searchWithExa(
 
 /** Format one or more Exa responses as markdown for the tool output. */
 export function formatExaResults(responses: ExaResponse[]): string {
-	const blocks = responses.map(({ query, results }) => {
+	const blocks = responses.map(({ query, results, error }) => {
 		const header = `## Results for "${query}"`;
+		if (error) return `${header}\n\n_Error: ${error}_`;
 		if (results.length === 0) return `${header}\n\n_No results._`;
 		const items = results.map((r, i) => {
 			const date = r.publishedDate ? ` — ${r.publishedDate.slice(0, 10)}` : "";
