@@ -1,6 +1,6 @@
 {
   "name": "pi-simple-web-tools",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Minimal Pi extension: web_search via Exa + fetch_content (markdown content-negotiation, Readability, lazy Playwright fallback).",
   "type": "module",
   "license": "MIT",
