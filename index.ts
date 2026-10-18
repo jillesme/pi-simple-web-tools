@@ -56,9 +56,11 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Search the web with Exa and return ranked results with source URLs and text snippets. " +
 			"For research, prefer 'queries' (plural) with 2-4 varied angles over a single query — queries run in parallel and are searched independently for broader coverage. " +
-			"Use 'type' to trade speed for depth and 'category' to focus on a kind of source (e.g. news, research papers, companies).",
+			"Use objective to describe the evidence needed and preferred sources. Default auto is suitable for most searches; use deep for multi-step research. " +
+			"Publication dates are estimates, not freshness guarantees; maxAgeHours controls retrieved content freshness. Prefer domainFilter over site: query operators. " +
+			"Large search output is saved to a file with an inline preview.",
 		promptSnippet:
-			"Use for web research. Prefer {queries:[...]} with 2-4 varied angles (run in parallel). Optional type (speed vs depth) and category (news, publication, company, …).",
+			"Use for web research. Prefer {queries:[...]} with 2-4 varied angles (run in parallel). Set objective for source/evidence preferences; use maxAgeHours when fresh page content matters.",
 		parameters: Type.Object({
 			query: Type.Optional(Type.String({ description: "Single search query." })),
 			queries: Type.Optional(
@@ -66,7 +68,15 @@ export default function (pi: ExtensionAPI) {
 					description: "Multiple queries, each searched independently. Vary phrasing/scope/angle for coverage.",
 				}),
 			),
-			numResults: Type.Optional(Type.Number({ description: "Results per query (default: 5, max: 20)." })),
+			numResults: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: "Results per query (default: 5, max: 20)." })),
+			objective: Type.Optional(Type.String({ minLength: 1, maxLength: 4096, description: "Goal for this search turn; say which documents should rank first, which should be excluded, and what specific facts or figures to pull from them. Do not include secrets or unrelated conversation context." })),
+			maxAgeHours: Type.Optional(Type.Integer({ minimum: -1, maximum: 720, description: "Maximum cached page-content age in hours. 0: fetch fresh; -1: cache only. Omit for normal behavior. Does not filter publication dates." })),
+			highlightMode: Type.Optional(StringEnum(["standard", "bounded", "dynamic"], { description: "Excerpt strategy: standard (default) lets Exa choose per-page excerpts; bounded requests a smaller excerpt budget; dynamic (beta) allocates context across results." })),
+			highlightMaxCharacters: Type.Optional(Type.Integer({ minimum: 1, maximum: 20000, description: "Per-page excerpt budget for bounded mode only (default 2000)." })),
+			startPublishedDate: Type.Optional(Type.String({ description: "ISO 8601 publication start timestamp. Cannot combine with recencyFilter." })),
+			endPublishedDate: Type.Optional(Type.String({ description: "ISO 8601 publication end timestamp." })),
+			additionalQueries: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 10, description: "Deep modes only: distinct starting queries within ONE research request, unlike queries which makes separate requests." })),
+			systemPrompt: Type.Optional(Type.String({ minLength: 1, description: "Deep modes only: research guidance such as official-source preferences and deduplication." })),
 			type: Type.Optional(
 				StringEnum(SEARCH_TYPES, {
 					description:
@@ -80,14 +90,14 @@ export default function (pi: ExtensionAPI) {
 					description:
 						"Focus on a type of source. 'publication': research papers/preprints/journals. 'news': news articles. " +
 						"'company': company pages. 'people': person profiles. 'personal site': blogs/personal pages. 'financial report': filings/earnings. " +
-						"Note: 'company' and 'people' do not support recencyFilter or excluded ('-') domains.",
+						"Note: 'company' and 'people' do not support publication-date filters; only 'people' disallows excluded domains.",
 				}),
 			),
 			recencyFilter: Type.Optional(
 				StringEnum(["day", "week", "month", "year"], { description: "Only results published within this window." }),
 			),
 			domainFilter: Type.Optional(
-				Type.Array(Type.String(), { description: "Limit to domains (prefix with - to exclude)." }),
+				Type.Array(Type.String(), { description: "Limit to domains, path prefixes (example.com/docs), or wildcard subdomains (*.example.com). Prefix with - to exclude." }),
 			),
 		}),
 
@@ -97,13 +107,10 @@ export default function (pi: ExtensionAPI) {
 				.filter(Boolean);
 
 			if (queryList.length === 0) {
-				return {
-					content: [{ type: "text", text: "Error: No query provided. Use 'query' or 'queries'." }],
-					details: { error: "No query provided" },
-				};
+				throw new Error("No query provided. Use 'query' or 'queries'.");
 			}
 
-			const numResults = params.numResults ? Math.min(Math.max(params.numResults, 1), 20) : undefined;
+			const numResults = params.numResults;
 			onUpdate?.({ content: [{ type: "text", text: `Searching ${queryList.length} quer${queryList.length === 1 ? "y" : "ies"}...` }] });
 
 			// Run queries in parallel; a failing query is reported inline without discarding the others.
@@ -115,27 +122,41 @@ export default function (pi: ExtensionAPI) {
 							numResults,
 							type: params.type,
 							category: params.category,
+							objective: params.objective,
+							maxAgeHours: params.maxAgeHours,
+							highlightMode: params.highlightMode,
+							highlightMaxCharacters: params.highlightMaxCharacters,
+							startPublishedDate: params.startPublishedDate,
+							endPublishedDate: params.endPublishedDate,
+							additionalQueries: params.additionalQueries,
+							systemPrompt: params.systemPrompt,
 							recencyFilter: params.recencyFilter,
 							domainFilter: params.domainFilter,
 							signal,
-						}).catch((e): ExaResponse => ({
-							query,
-							results: [],
-							error: e instanceof Error ? e.message : String(e),
-						})),
+						}).catch((e): ExaResponse => {
+							if (signal?.aborted) throw e;
+							return { query, results: [], error: e instanceof Error ? e.message : String(e) };
+						}),
 					),
 				),
 			);
 
 			const total = responses.reduce((sum, r) => sum + r.results.length, 0);
 			const errors = responses.filter((r) => r.error).map((r) => ({ query: r.query, error: r.error }));
+			const output = formatExaResults(responses);
+			const path = output.length > MAX_INLINE_CONTENT ? persistContent(JSON.stringify([queryList, output]), output) : null;
 			return {
-				content: [{ type: "text", text: formatExaResults(responses) }],
+				isError: errors.length === responses.length,
+				content: [{ type: "text", text: path
+					? `Full search results saved to ${path}. Read with offset/limit.\n\n${output.slice(0, PREVIEW_CHARS)}`
+					: output }],
 				details: {
 					queries: queryList,
 					type: params.type ?? "auto",
 					category: params.category,
 					resultCount: total,
+					path,
+					diagnostics: responses.map(({ query, diagnostics }) => ({ query, ...diagnostics })),
 					...(errors.length ? { errors } : {}),
 				},
 			};

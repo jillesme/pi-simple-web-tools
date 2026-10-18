@@ -61,7 +61,10 @@ Override the config path with `PI_WEB_TOOLS_CONFIG`.
 ### `web_search`
 
 ```typescript
-web_search({ query: "typescript structural typing" })
+web_search({ query: "typescript structural typing", objective: "Find current official documentation and explain assignability caveats with examples." })
+web_search({ query: "Cloudflare Workers pricing", maxAgeHours: 24 })
+web_search({ query: "React server components", highlightMode: "dynamic" })
+web_search({ query: "SQLite WAL", highlightMode: "bounded", highlightMaxCharacters: 3000 })
 web_search({ queries: ["react server components", "next.js app router caching"] })
 web_search({ query: "llm evals", numResults: 10, recencyFilter: "month" })
 web_search({ query: "vite plugins", domainFilter: ["github.com", "-medium.com"] })
@@ -76,10 +79,61 @@ web_search({ queries: ["cloudflare earnings", "cloudflare workers pricing change
 | `type` | `instant`, `fast`, `auto` (default), `deep-lite`, `deep`, `deep-reasoning` — trade speed for depth |
 | `category` | `publication`, `news`, `company`, `people`, `personal site`, `financial report` |
 | `recencyFilter` | `day`, `week`, `month`, or `year` |
-| `domainFilter` | Limit to domains (prefix with `-` to exclude) |
+| `domainFilter` | Domains, path prefixes (`example.com/docs`), or wildcard subdomains (`*.example.com`); prefix with `-` to exclude |
+| `objective` | Broader search goal: preferred sources, exclusions, and facts/code to extract (1–4096 characters). Do not include secrets or unnecessary context. |
+| `maxAgeHours` | Maximum cached page-content age, -1 to 720 hours. `0` always fetches fresh; `-1` uses cache only. Omit for normal behavior. |
+| `highlightMode` | `standard` (default), `bounded`, or `dynamic` (beta, cross-result context allocation) |
+| `highlightMaxCharacters` | Excerpt budget per page in `bounded` mode only; default 2000, range 1–20000 |
+| `startPublishedDate` / `endPublishedDate` | ISO 8601 publication timestamps; start cannot be combined with `recencyFilter` |
+| `additionalQueries` | 1–10 distinct starting queries within one deep-mode research request, not independent requests like `queries` |
+| `systemPrompt` | Deep-mode research instructions: source preferences, deduplication, etc. |
 
-`company` and `people` categories don't support `recencyFilter` or excluded (`-`)
-domains (an Exa API restriction); the tool returns a clear error if you combine them.
+`company` and `people` categories don't support publication-date filters. Only
+`people` disallows excluded domains; company exclusions are supported. Prefer
+`domainFilter` over `site:` operators, which the service may relax when no matches
+are found. Publication dates are estimates, not proof of when a page changed.
+
+### Quality and context
+
+`auto` remains the default; use `deep` for tasks requiring iterative research,
+not for every lookup. The tool returns source excerpts, not a synthesized Exa
+answer. `additionalQueries` and `systemPrompt` are deliberately limited to deep
+modes by this tool. `outputSchema` and synthesis are not exposed.
+
+Regular highlights let Exa choose the excerpt size. The 2,000-character text
+fallback **does not cap highlights**. Bounded mode applies a per-page highlight
+budget (the service can exceed it; this is not a hard local truncation limit).
+Dynamic Highlights allocates context across all results and automatically
+sends `Exa-Beta: dynamic-highlights-2026-08-28`. Dynamic is opt-in because it is a
+research preview. It cannot be combined with `highlightMaxCharacters`. Text is
+still requested as fallback when highlights are empty, including in dynamic mode.
+
+Use `maxAgeHours` for content freshness (current pricing or evolving docs), not
+`recencyFilter`, which selects by estimated publication date. Fresh retrieval can
+add latency. No forced-fresh default is imposed on static documentation.
+
+Search output above 100,000 characters is saved to a temporary file, with a
+4,000-character preview and a path to read the complete result. This protects
+context without losing the source evidence.
+
+### Reliability and diagnostics
+
+HTTP 429 and 5xx receive up to two retries with exponential backoff, jitter and
+`Retry-After`, all within the original 60-second request deadline (180 seconds for
+deep modes). Other HTTP errors and transport failures are not automatically
+retried. Cancellation interrupts requests and backoff. Independent query failures
+are preserved inline; when all queries fail the tool result is marked as an error.
+
+API notices explaining result behavior are included with the model-facing results.
+Request IDs, estimated `costDollars`, server `searchTime`, warning messages and
+attempt counts are retained in tool-result `details.diagnostics`, not added to the
+model's evidence. Costs are estimates, not invoice records; server timing need not
+include all end-to-end work. API warnings describe request issues, while notices
+can explain relaxed query restrictions.
+
+No SDK dependency was added. The REST API and current parameters are documented at
+https://exa.ai/docs/reference/search . The paid quality comparison runner and
+results are under `benchmarks/` in the source checkout (not the npm tarball).
 
 ### `fetch_content`
 
